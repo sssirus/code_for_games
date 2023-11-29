@@ -153,8 +153,9 @@ def generate_random_words(  # noqa: max-complexity
                 #res1= re.findall(r'\'([a-zA-Z])\' appears in the ([012345])th position.', prompts[i])
                 #res2 = re.findall(r'\'([a-zA-Z])\' appeared but not in the ([012345])th position.', prompts[i])
                 #res3 = re.findall(r'\'([a-zA-Z,]+)\' do not exist in the target word. ', prompts[i])
-                res1= re.findall(r'exists: (a-zA-Z,]+)', prompts[i])
-                res2 = re.findall(r'absents: (a-zA-Z,]+)', prompts[i])
+
+                res1= re.findall(r'Exists letters: ([a-zA-Z,]+)\.', prompts[i])
+                res2 = re.findall(r'Absents letters: ([a-zA-Z,]+)\.', prompts[i])
                 #print('res3',res3)
                 not_contained=[]
                 contained=[]
@@ -174,7 +175,8 @@ def generate_random_words(  # noqa: max-complexity
                 for item in res2:
                     not_contained.extend(item.split(','))
                     not_contained=set(not_contained)
-
+                #print('prompt:',prompts[i])
+                #print('exist:',res1,'absent:',res2)
                 for idx,chara in enumerate(guess_word):
                     if chara in not_contained:
                         reward-=2
