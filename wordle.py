@@ -182,9 +182,9 @@ def generate_random_words(  # noqa: max-complexity
                         reward-=2
                     if chara in contained:
                         reward+=2
-                for chara in not_contained:
-                    if chara not in set(guess_word):
-                        reward+=2
+                # for chara in not_contained:
+                #     if chara not in set(guess_word):
+                #         reward+=2
 
 
                     # for j,item in enumerate(contain_and_correct_location_letters):
