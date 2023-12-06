@@ -75,7 +75,7 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
     def prepare_learning(self):
 
         self.train_dataloader = self.create_train_dataloader()
-        eval_dataloader = self.eval_pipeline.create_loader(self.config.train.batch_size)
+        eval_dataloader = self.store.create_loader(self.config.train.batch_size)
 
         (
             self.model,
