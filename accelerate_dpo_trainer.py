@@ -38,7 +38,8 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
             pad_token_id=self.tokenizer.pad_token_id,
         )
         self.loss_type = "sigmoid"
-
+        self.label_smoothing = 0
+        self.beta =0.1
     def get_arch(self, config):
         from_fn = AutoModelForCausalLM.from_pretrained
         if issubclass(type(config.model.model_path), PretrainedConfig):
