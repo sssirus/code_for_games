@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from transformers import (
     DataCollatorWithPadding,
     PreTrainedTokenizer,
-    PreTrainedTokenizerFast,
+    PreTrainedTokenizerFast, BatchEncoding,
 )
 
 
@@ -132,6 +132,8 @@ class DpoStore(BaseRolloutStore):
             batch["rejected_input_ids"]=rejected["input_ids"]
             batch["rejected_attention_masks"] = rejected["attention_mask"]
             batch["rejected_labels"]=rejected_labels
-            return batch
+            return BatchEncoding(batch, tensor_type= "pt")
 
         return DataLoader(self, batch_size=batch_size, collate_fn=collate_fn, shuffle=shuffle)
+    def push(self, exps: Iterable[Any]):
+        pass

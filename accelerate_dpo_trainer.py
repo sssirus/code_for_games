@@ -75,26 +75,28 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
     def prepare_learning(self):
 
         self.train_dataloader = self.create_train_dataloader()
-        eval_dataloader = self.store.create_loader(self.config.train.batch_size)
+        eval_dataloader = self.eval_pipeline.create_loader(self.config.train.batch_size)
 
         (
             self.model,
             self.opt,
             self.eval_dataloader,
         ) = self.accelerator.prepare(self.model, self.opt, eval_dataloader)
-        if not hasattr(self.model, "frozen_head") and not self.model.peft_type:
+        if not hasattr(self.model, "frozen_head"):
             self.ref_model = self.get_arch(self.config)
             self.ref_model.to(self.accelerator.device)
             self.ref_model.eval()
         self.n_inner_epochs = 1
         self.total_steps = self.config.train.epochs * len(self.train_dataloader)
         self.total_steps = min(self.total_steps, self.config.train.total_steps)
-        self.ref_mean = self.config.method.ref_mean
-        self.ref_std = self.config.method.ref_std
+        #self.ref_mean = self.config.method.ref_mean
+        #self.ref_std = self.config.method.ref_std
     def make_experience(self, samples, seq_length):
-
-        dialogs = [tokenize_dpo_dialogue(d, self.tokenizer, seq_length) for d in samples]
-        self.store = DpoStore(dialogs, self.tokenizer)
+        if isinstance(samples[0], str):
+            self.store = PromptPipeline(samples, seq_length, self.tokenizer)
+        else:
+            dialogs = [tokenize_dpo_dialogue(d, self.tokenizer, seq_length) for d in samples]
+            self.store = DpoStore(dialogs, self.tokenizer)
     def get_batch_metrics(
         self,
         model,

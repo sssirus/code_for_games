@@ -31,7 +31,7 @@ default_config = TRLConfig(
         checkpoint_dir="/data/user_model/wordle/checkpoints/dpo_wordle/hf_model/",
     ),
     model=ModelConfig(model_path="/data/user_model/wordle/checkpoints/sft_wordle/hf_model/checkpoint_02000/hf_model/", num_layers_unfrozen=2),
-    tokenizer=TokenizerConfig(tokenizer_path="/data/user_model/wordle/checkpoints/sft_wordle/hf_model/checkpoint_02000/hf_model/", truncation_side="right",tokenizer_extra_configs=dict( use_fast=False)),
+    tokenizer=TokenizerConfig(tokenizer_path="/data/pretrain_model/llama-huggingface-7b/", truncation_side="right",tokenizer_extra_configs=dict( use_fast=False)),
     optimizer=OptimizerConfig(name="adamw", kwargs=dict(lr=1e-6, betas=(0.9, 0.95), eps=1.0e-8, weight_decay=1.0e-6)),
     scheduler=SchedulerConfig(name="cosine_annealing", kwargs=dict(T_max=100000000, eta_min=1e-6)),
     method=DPOConfig(
@@ -56,8 +56,8 @@ def main(hparams={}):
     trlx.train(
         config=config,
         samples=dataset["train"]["prompt_chosen_rejected"],#只用正确答案来训练
-        eval_prompts=dataset["train"]["prompt_chosen_rejected"][:300],
-        #metric_fn=lambda samples, prompts,outputs, **kwargs: metric_fn(samples,prompts,outputs),
+        eval_prompts=dataset["train"]["prompt"][:300],
+        metric_fn=lambda samples, prompts,outputs, **kwargs: metric_fn(samples,prompts,outputs),
         #stop_sequences=["</s>", "</s", "</", "<"],
         #rewards=[20.0 for _ in range(len(dataset["train"]["chosen_sample"]))]
     )
