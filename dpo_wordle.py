@@ -23,7 +23,7 @@ default_config = TRLConfig(
         seq_length=128,
         epochs=200,
         total_steps=100000,
-        batch_size=4,
+        batch_size=1,
         checkpoint_interval=10000,
         eval_interval=1000,
         pipeline="PromptPipeline",
@@ -56,7 +56,7 @@ def main(hparams={}):
     trlx.train(
         config=config,
         samples=dataset["train"]["prompt_chosen_rejected"],#只用正确答案来训练
-        eval_prompts=dataset["train"]["prompt"][:300],
+        eval_prompts=dataset["train"]["prompt"][:3],
         metric_fn=lambda samples, prompts,outputs, **kwargs: metric_fn(samples,prompts,outputs),
         #stop_sequences=["</s>", "</s", "</", "<"],
         #rewards=[20.0 for _ in range(len(dataset["train"]["chosen_sample"]))]

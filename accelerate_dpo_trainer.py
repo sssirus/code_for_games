@@ -6,6 +6,7 @@ from transformers import AutoModelForCausalLM, PretrainedConfig
 import torch.nn.functional as F
 from trlx.data.configs import TRLConfig
 from trlx.data.method_configs import MethodConfig, register_method
+from trlx.data.ppo_types import PPORLBatch
 from trlx.pipeline.dpo_pipline import tokenize_dpo_dialogue, DpoStore
 from trlx.pipeline.offline_pipeline import PromptPipeline
 
@@ -61,9 +62,16 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
 
         return model
 
-    def loss(self, batch):
+    def loss(self, batch:PPORLBatch):
+        batch_dict=dict()
+        batch_dict["chosen_input_ids"] = torch.vstack(batch.chosen_input_ids).to(self.accelerator.device)
+        batch_dict["chosen_attention_masks"] = torch.vstack(batch.chosen_attention_masks).to(self.accelerator.device)
+        batch_dict["chosen_labels"] = torch.vstack(batch.chosen_labels).to(self.accelerator.device)
+        batch_dict["rejected_input_ids"] = torch.vstack(batch.rejected_input_ids).to(self.accelerator.device)
+        batch_dict["rejected_attention_masks"] = torch.vstack(batch.rejected_attention_masks).to(self.accelerator.device)
+        batch_dict["rejected_labels"] = torch.vstack(batch.rejected_labels).to(self.accelerator.device)
 
-        loss, metrics = self.get_batch_metrics(self.model, batch)
+        loss, metrics = self.get_batch_metrics(self.model, batch_dict)
 
         stats = {"loss": loss.item()}
 
@@ -95,12 +103,15 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
         if isinstance(samples[0], str):
             self.store = PromptPipeline(samples, seq_length, self.tokenizer)
         else:
+
             dialogs = [tokenize_dpo_dialogue(d, self.tokenizer, seq_length) for d in samples]
             self.store = DpoStore(dialogs, self.tokenizer)
+
     def get_batch_metrics(
         self,
         model,
         batch: Dict[str, Union[List, torch.LongTensor]],
+        train_eval: Literal["train", "eval"] = "train",
     ):
         """Compute the DPO loss and other metrics for the given batch of inputs for train or test."""
         metrics = {}
@@ -110,7 +121,7 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
             policy_rejected_logps,
             policy_chosen_logits,
             policy_rejected_logits,
-        ) = self.dual_forward(model, batch)
+        ) = self.concatenated_forward(model, batch)
         with torch.no_grad():
             if self.ref_model is None:
                 with self.accelerator.unwrap_model(self.model).disable_adapter():
@@ -119,14 +130,14 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
                         reference_rejected_logps,
                         _,
                         _,
-                    ) = self.dual_forward(self.model, batch)
+                    ) = self.concatenated_forward(self.model, batch)
             else:
                 (
                     reference_chosen_logps,
                     reference_rejected_logps,
                     _,
                     _,
-                ) = self.dual_forward(self.ref_model, batch)
+                ) = self.concatenated_forward(self.ref_model, batch)
 
         losses, chosen_rewards, rejected_rewards = self.dpo_loss(
             policy_chosen_logps,
@@ -136,40 +147,17 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
         )
         reward_accuracies = (chosen_rewards > rejected_rewards).float()
 
-
-        metrics["rewards/chosen"] = chosen_rewards.cpu().mean()
-        metrics["rewards/rejected"] = rejected_rewards.cpu().mean()
-        metrics["rewards/accuracies"] = reward_accuracies.cpu().mean()
-        metrics["rewards/margins"] = (chosen_rewards - rejected_rewards).cpu().mean()
-        metrics["logps/rejected"] = policy_rejected_logps.detach().cpu().mean()
-        metrics["logps/chosen"] = policy_chosen_logps.detach().cpu().mean()
-        metrics["logits/rejected"] = policy_rejected_logits.detach().cpu().mean()
-        metrics["logits/chosen"] = policy_chosen_logits.detach().cpu().mean()
+        prefix = "eval_" if train_eval == "eval" else ""
+        metrics[f"{prefix}rewards/chosen"] = chosen_rewards.cpu().mean()
+        metrics[f"{prefix}rewards/rejected"] = rejected_rewards.cpu().mean()
+        metrics[f"{prefix}rewards/accuracies"] = reward_accuracies.cpu().mean()
+        metrics[f"{prefix}rewards/margins"] = (chosen_rewards - rejected_rewards).cpu().mean()
+        metrics[f"{prefix}logps/rejected"] = policy_rejected_logps.detach().cpu().mean()
+        metrics[f"{prefix}logps/chosen"] = policy_chosen_logps.detach().cpu().mean()
+        metrics[f"{prefix}logits/rejected"] = policy_rejected_logits.detach().cpu().mean()
+        metrics[f"{prefix}logits/chosen"] = policy_chosen_logits.detach().cpu().mean()
 
         return losses.mean(), metrics
-    def dual_forward(
-        self, model: nn.Module, batch: Dict[str, Union[List, torch.LongTensor]]
-    ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
-
-
-        chosen_logits = model(input_ids=batch['chosen_input_ids'], attention_mask=batch['chosen_attention_masks'], labels=batch['chosen_labels']).logits.to(torch.float32)
-        chosen_logps = self._get_batch_logps(
-            chosen_logits,
-            batch['chosen_labels'],
-            average_log_prob=False,
-        )
-
-        rejected_logits = model(input_ids=batch['rejected_input_ids'], attention_mask=batch['rejected_attention_masks'], labels=batch['rejected_labels']).logits.to(torch.float32)
-        rejected_logps = self._get_batch_logps(
-            rejected_logits,
-            batch['chosen_labels'],
-            average_log_prob=False,
-        )
-
-
-
-        return (chosen_logps, rejected_logps, chosen_logits, rejected_logits)
-
 
 
     def pad_to_length(tensor: torch.Tensor, length: int, pad_value: Union[int, float], dim: int = -1) -> torch.Tensor:
@@ -255,7 +243,6 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
         if logits.shape[:-1] != labels.shape:
             raise ValueError("Logits (batch and sequence length dim) and labels must have the same shape.")
 
-
         labels = labels[:, 1:].clone()
         logits = logits[:, :-1, :]
         loss_mask = labels != self.tokenizer.pad_token_id
@@ -269,3 +256,76 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
             return (per_token_logps * loss_mask).sum(-1) / loss_mask.sum(-1)
         else:
             return (per_token_logps * loss_mask).sum(-1)
+    def concatenated_inputs(self, batch: Dict[str, Union[List, torch.LongTensor]]) -> Dict[str, torch.LongTensor]:
+        """Concatenate the chosen and rejected inputs into a single tensor.
+
+        Args:
+            batch: A batch of data. Must contain the keys 'chosen_input_ids' and 'rejected_input_ids', which are tensors of shape (batch_size, sequence_length).
+
+        Returns:
+            A dictionary containing the concatenated inputs under the key 'concatenated_input_ids'.
+        """
+        concatenated_batch = {}
+
+
+        max_length = max(batch["chosen_input_ids"].shape[1], batch["rejected_input_ids"].shape[1])
+
+        for k in batch:
+            if k.startswith("chosen") and isinstance(batch[k], torch.Tensor):
+
+                concatenated_key = k.replace("chosen", "concatenated")
+                concatenated_batch[concatenated_key] = self.pad_to_length(batch[k], max_length, pad_value=self.tokenizer.pad_token_id)
+        for k in batch:
+            if k.startswith("rejected") and isinstance(batch[k], torch.Tensor):
+
+                concatenated_key = k.replace("rejected", "concatenated")
+                concatenated_batch[concatenated_key] = torch.cat(
+                    (
+                        concatenated_batch[concatenated_key],
+                        self.pad_to_length(batch[k], max_length, pad_value=self.tokenizer.pad_token_id),
+                    ),
+                    dim=0,
+                ).to(self.accelerator.device)
+
+        if self.is_encoder_decoder:
+            concatenated_batch["concatenated_input_ids"] = batch["prompt_input_ids"].repeat(2, 1)
+            concatenated_batch["concatenated_attention_mask"] = batch["prompt_attention_mask"].repeat(2, 1)
+
+        return concatenated_batch
+    def concatenated_forward(
+        self, model: nn.Module, batch: Dict[str, Union[List, torch.LongTensor]]
+    ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
+        """Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
+
+        We do this to avoid doing two forward passes, because it's faster for FSDP.
+        """
+        concatenated_batch = self.concatenated_inputs(batch)
+        len_chosen = batch["chosen_labels"].shape[0]
+
+        model_kwargs = (
+            {
+                "labels": concatenated_batch["concatenated_labels"],
+                "decoder_input_ids": concatenated_batch.pop("concatenated_decoder_input_ids", None),
+            }
+            if self.is_encoder_decoder
+            else {}
+        )
+        all_logits = model(
+            concatenated_batch["concatenated_input_ids"],
+            attention_mask=concatenated_batch["concatenated_attention_mask"],
+            **model_kwargs,
+        ).logits.to(torch.float32)
+
+        all_logps = self._get_batch_logps(
+            all_logits,
+            concatenated_batch["concatenated_labels"],
+            average_log_prob=False,
+        )
+
+        chosen_logps = all_logps[:len_chosen]
+        rejected_logps = all_logps[len_chosen:]
+
+        chosen_logits = all_logits[:len_chosen]
+        rejected_logits = all_logits[len_chosen:]
+
+        return (chosen_logps, rejected_logps, chosen_logits, rejected_logits)

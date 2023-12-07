@@ -10,9 +10,9 @@ from transformers import (
     PreTrainedTokenizerFast, BatchEncoding,
 )
 
-
+from trlx.data.dpo_types import DPORLBatch
 from trlx.pipeline import BasePipeline, BaseRolloutStore, register_datapipeline
-
+import torch.nn.functional as F
 
 @dataclass
 class DpoMessage:
@@ -98,15 +98,16 @@ class DpoStore(BaseRolloutStore):
             prompt_chosen_input_id = torch.tensor([t for m in [d[0],d[1]] for t in m.tokens], dtype=torch.long)
             prompt_chosen_label =torch.tensor([t if m.type >0 else -100 for m in [d[0],d[1]] for t in m.tokens], dtype=torch.long)
 
-            prompt_rejected_attention_mask=torch.ones(sum(len(m.tokens) for m in [d[0],d[1]]), dtype=torch.bool)
-            prompt_rejected_input_id = torch.tensor([t for m in [d[0],d[1]] for t in m.tokens], dtype=torch.long)
-            prompt_rejected_label =torch.tensor([t if m.type >0 else -100 for m in [d[0],d[1]] for t in m.tokens], dtype=torch.long)
+            prompt_rejected_attention_mask=torch.ones(sum(len(m.tokens) for m in [d[0],d[2]]), dtype=torch.bool)
+            prompt_rejected_input_id = torch.tensor([t for m in [d[0],d[2]] for t in m.tokens], dtype=torch.long)
+            prompt_rejected_label =torch.tensor([t if m.type >0 else -100 for m in [d[0],d[2]] for t in m.tokens], dtype=torch.long)
             chosen_attention_masks.append(prompt_chosen_attention_mask)
             chosen_input_ids.append(prompt_chosen_input_id)
             chosen_labels.append(prompt_chosen_label)
             rejected_attention_masks.append(prompt_rejected_attention_mask)
             rejected_input_ids.append(prompt_rejected_input_id)
             rejected_labels.append(prompt_rejected_label)
+
 
         self.history = [
             dict(chosen_input_ids=a, chosen_attention_masks=b, chosen_labels=c,rejected_input_ids=d, rejected_attention_masks=e, rejected_labels=f) for a, b, c,d,e,f in zip(chosen_input_ids, chosen_attention_masks, chosen_labels,rejected_input_ids,rejected_attention_masks,rejected_labels)
@@ -116,24 +117,33 @@ class DpoStore(BaseRolloutStore):
         hf_collate_fn = DataCollatorWithPadding(self.tokenizer)
 
         def collate_fn(elems: Iterable[dict]):
-            chosen = hf_collate_fn(
-                {"input_ids": [e["chosen_input_ids"] for e in elems], "attention_mask": [e["chosen_attention_masks"] for e in elems]}
-            )
-            chosen_labels = hf_collate_fn([{"input_ids": e["chosen_labels"]} for e in elems])["input_ids"]
-            rejected = hf_collate_fn(
-                {"input_ids": [e["rejected_input_ids"] for e in elems], "attention_mask": [e["rejected_attention_masks"] for e in elems]}
-            )
-            rejected_labels = hf_collate_fn([{"input_ids": e["rejected_labels"]} for e in elems])["input_ids"]
-
             batch=dict()
-            batch["chosen_input_ids"]=chosen["input_ids"]
-            batch["chosen_attention_masks"] = chosen["attention_mask"]
-            batch["chosen_labels"]=chosen_labels
-            batch["rejected_input_ids"]=rejected["input_ids"]
-            batch["rejected_attention_masks"] = rejected["attention_mask"]
-            batch["rejected_labels"]=rejected_labels
-            return BatchEncoding(batch, tensor_type= "pt")
+            batch['chosen_input_ids']=list()
+            batch['chosen_attention_masks'] = list()
+            batch['chosen_labels'] = list()
+            batch['rejected_input_ids'] = list()
+            batch['rejected_attention_masks'] = list()
+            batch['rejected_labels'] = list()
+            for elem in elems:
+                batch['chosen_input_ids'].append(elem['chosen_input_ids'])
+                batch['chosen_attention_masks'].append(elem['chosen_attention_masks'])
+                batch['chosen_labels'].append(elem['chosen_labels'])
+                batch['rejected_input_ids'].append(elem['rejected_input_ids'])
+                batch['rejected_attention_masks'].append(elem['rejected_attention_masks'])
+                batch['rejected_labels'].append(elem['rejected_labels'])
+            # chosen = hf_collate_fn(
+            #     {"input_ids": [e["chosen_input_ids"] for e in elems], "attention_mask": [e["chosen_attention_masks"] for e in elems]}
+            # )
+            # chosen_labels = hf_collate_fn([{"input_ids": e["chosen_labels"]} for e in elems])["input_ids"]
+            # rejected = hf_collate_fn(
+            #     {"input_ids": [e["rejected_input_ids"] for e in elems], "attention_mask": [e["rejected_attention_masks"] for e in elems]}
+            # )
+            # rejected_labels = hf_collate_fn([{"input_ids": e["rejected_labels"]} for e in elems])["input_ids"]
+
+
+
+            return DPORLBatch(batch['chosen_input_ids'],batch['chosen_attention_masks'] ,batch['chosen_labels'],batch['rejected_input_ids'],batch['rejected_attention_masks'] ,batch['rejected_labels'])
 
         return DataLoader(self, batch_size=batch_size, collate_fn=collate_fn, shuffle=shuffle)
     def push(self, exps: Iterable[Any]):
-        pass
+        self.history += exps
