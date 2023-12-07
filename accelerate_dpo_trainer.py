@@ -37,7 +37,7 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
             eos_token_id=self.tokenizer.eos_token_id,
             pad_token_id=self.tokenizer.pad_token_id,
         )
-
+        self.loss_type = "sigmoid"
 
     def get_arch(self, config):
         from_fn = AutoModelForCausalLM.from_pretrained
@@ -62,16 +62,10 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
 
         return model
 
-    def loss(self, batch:PPORLBatch):
-        batch_dict=dict()
-        batch_dict["chosen_input_ids"] = torch.vstack(batch.chosen_input_ids).to(self.accelerator.device)
-        batch_dict["chosen_attention_masks"] = torch.vstack(batch.chosen_attention_masks).to(self.accelerator.device)
-        batch_dict["chosen_labels"] = torch.vstack(batch.chosen_labels).to(self.accelerator.device)
-        batch_dict["rejected_input_ids"] = torch.vstack(batch.rejected_input_ids).to(self.accelerator.device)
-        batch_dict["rejected_attention_masks"] = torch.vstack(batch.rejected_attention_masks).to(self.accelerator.device)
-        batch_dict["rejected_labels"] = torch.vstack(batch.rejected_labels).to(self.accelerator.device)
+    def loss(self, batch):
 
-        loss, metrics = self.get_batch_metrics(self.model, batch_dict)
+
+        loss, metrics = self.get_batch_metrics(self.model, batch)
 
         stats = {"loss": loss.item()}
 
@@ -104,7 +98,8 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
             self.store = PromptPipeline(samples, seq_length, self.tokenizer)
         else:
 
-            dialogs = [tokenize_dpo_dialogue(d, self.tokenizer, seq_length) for d in samples]
+            max_prompt_length = 128,
+            dialogs = [tokenize_dpo_dialogue(seq_length,max_prompt_length,d, self.tokenizer) for d in samples]
             self.store = DpoStore(dialogs, self.tokenizer)
 
     def get_batch_metrics(
@@ -113,6 +108,7 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
         batch: Dict[str, Union[List, torch.LongTensor]],
         train_eval: Literal["train", "eval"] = "train",
     ):
+        #print("model",batch)
         """Compute the DPO loss and other metrics for the given batch of inputs for train or test."""
         metrics = {}
 
@@ -122,6 +118,7 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
             policy_chosen_logits,
             policy_rejected_logits,
         ) = self.concatenated_forward(model, batch)
+        #print("ref", batch)
         with torch.no_grad():
             if self.ref_model is None:
                 with self.accelerator.unwrap_model(self.model).disable_adapter():
@@ -160,7 +157,7 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
         return losses.mean(), metrics
 
 
-    def pad_to_length(tensor: torch.Tensor, length: int, pad_value: Union[int, float], dim: int = -1) -> torch.Tensor:
+    def pad_to_length(self,tensor: torch.Tensor, length: int, pad_value: Union[int, float], dim: int = -1) -> torch.Tensor:
         if tensor.size(dim) >= length:
             return tensor
         else:
@@ -245,10 +242,10 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
 
         labels = labels[:, 1:].clone()
         logits = logits[:, :-1, :]
-        loss_mask = labels != self.tokenizer.pad_token_id
+        loss_mask = labels != -100
 
         # dummy token; we'll ignore the losses on these tokens later
-        labels[labels == self.tokenizer.pad_token_id] = 0
+        labels[labels == -100] = 0
 
         per_token_logps = torch.gather(logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
 
@@ -272,24 +269,32 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
 
         for k in batch:
             if k.startswith("chosen") and isinstance(batch[k], torch.Tensor):
-
+                if "labels" in k:
+                    pad_value = -100
+                elif 'id' in k :
+                    pad_value = self.tokenizer.pad_token_id
+                else:
+                    pad_value =0
                 concatenated_key = k.replace("chosen", "concatenated")
-                concatenated_batch[concatenated_key] = self.pad_to_length(batch[k], max_length, pad_value=self.tokenizer.pad_token_id)
+                concatenated_batch[concatenated_key] = self.pad_to_length(batch[k], max_length, pad_value=pad_value)
         for k in batch:
             if k.startswith("rejected") and isinstance(batch[k], torch.Tensor):
-
+                if "labels" in k:
+                    pad_value = -100
+                elif 'id' in k :
+                    pad_value = self.tokenizer.pad_token_id
+                else:
+                    pad_value =0
                 concatenated_key = k.replace("rejected", "concatenated")
                 concatenated_batch[concatenated_key] = torch.cat(
                     (
                         concatenated_batch[concatenated_key],
-                        self.pad_to_length(batch[k], max_length, pad_value=self.tokenizer.pad_token_id),
+                        self.pad_to_length(batch[k], max_length, pad_value=pad_value),
                     ),
                     dim=0,
                 ).to(self.accelerator.device)
 
-        if self.is_encoder_decoder:
-            concatenated_batch["concatenated_input_ids"] = batch["prompt_input_ids"].repeat(2, 1)
-            concatenated_batch["concatenated_attention_mask"] = batch["prompt_attention_mask"].repeat(2, 1)
+
 
         return concatenated_batch
     def concatenated_forward(
@@ -305,23 +310,29 @@ class AccelerateDPOTrainer(AccelerateRLTrainer):
         model_kwargs = (
             {
                 "labels": concatenated_batch["concatenated_labels"],
-                "decoder_input_ids": concatenated_batch.pop("concatenated_decoder_input_ids", None),
+                #"decoder_input_ids": concatenated_batch.pop("concatenated_decoder_input_ids", None),
             }
-            if self.is_encoder_decoder
-            else {}
+
         )
+        # print("concatenated_input_ids",concatenated_batch["concatenated_input_ids"])
+        # print("concatenated_attention_mask",concatenated_batch["concatenated_attention_mask"])
+        # print("concatenated_labels",concatenated_batch["concatenated_labels"])
         all_logits = model(
             concatenated_batch["concatenated_input_ids"],
             attention_mask=concatenated_batch["concatenated_attention_mask"],
             **model_kwargs,
         ).logits.to(torch.float32)
-
+        # print("222concatenated_input_ids",concatenated_batch["concatenated_input_ids"])
+        # print("222concatenated_attention_mask",concatenated_batch["concatenated_attention_mask"])
+        # print("222concatenated_labels",concatenated_batch["concatenated_labels"])
         all_logps = self._get_batch_logps(
             all_logits,
             concatenated_batch["concatenated_labels"],
             average_log_prob=False,
         )
-
+        # print("333concatenated_input_ids",concatenated_batch["concatenated_input_ids"])
+        # print("333concatenated_attention_mask",concatenated_batch["concatenated_attention_mask"])
+        # print("333concatenated_labels",concatenated_batch["concatenated_labels"])
         chosen_logps = all_logps[:len_chosen]
         rejected_logps = all_logps[len_chosen:]
 
