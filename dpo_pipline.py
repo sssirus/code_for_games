@@ -10,24 +10,10 @@ from transformers import (
     PreTrainedTokenizerFast, BatchEncoding,
 )
 
-from trlx.data.dpo_types import DPORLBatch
+
 from trlx.pipeline import BasePipeline, BaseRolloutStore, register_datapipeline
 import torch.nn.functional as F
 
-@dataclass
-class DpoMessage:
-    """
-    Single message in dpo
-
-    :param type: 0:prompt 1:chosen_output 2:rejected_output
-    :type type: int
-
-    :param tokens: Tokenized message
-    :type tokens: Tuple[int]
-    """
-
-    type: int
-    tokens: Tuple[int]
 
 
 def tokenize_dpo_dialogue(
@@ -35,17 +21,16 @@ def tokenize_dpo_dialogue(
     max_prompt_length,
     dialogue: Union[str, Iterable[str]],
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
-) -> List[DpoMessage]:
+) -> Dict:
     """
     Tokenize sample with the interleaved form of (prompt_1, chosen_1, reject_1, prompt_2, chosen_2, reject_3...)
     """
     if isinstance(dialogue, str):
-        bos_token = tokenizer.bos_token or tokenizer.eos_token
-        dialogue = [bos_token, dialogue]
+        raise ValueError("Dpo must have an 3n number of phrases, alternating prompt and output")
     elif isinstance(dialogue, Iterable):
         if len(dialogue) % 3 != 0:
             raise ValueError("Dpo must have an 3n number of phrases, alternating prompt and output")
-        dialogue = list(dialogue)
+        #dialogue = list(dialogue)
     # add eos on the end of each sequences
     return tokenize_batch_element(max_length,max_prompt_length,tokenizer,dialogue[0],dialogue[1],dialogue[2])
 def tokenize_batch_element(
@@ -68,76 +53,89 @@ def tokenize_batch_element(
         """
         batch = {}
 
-        if not False:
-            chosen_tokens = tokenizer(chosen, add_special_tokens=False)
-            rejected_tokens = tokenizer(rejected, add_special_tokens=False)
-            prompt_tokens = tokenizer(prompt, add_special_tokens=False)
+        chosen_tokens = tokenizer(chosen, add_special_tokens=False)
+        rejected_tokens = tokenizer(rejected, add_special_tokens=False)
+        prompt_tokens = tokenizer(prompt, add_special_tokens=False)
 
-            eos_token_id = tokenizer.eos_token_id
-            # Get indices in list prompt_tokens["input_ids"] that equals the EOS token (often 0)
-            eos_indices_prompt = [i for i, x in enumerate(prompt_tokens["input_ids"]) if x == eos_token_id]
-            # attention mask these indices to eos_token_id
-            new_attention_mask = [
-                0 if i in eos_indices_prompt else p for i, p in enumerate(prompt_tokens["attention_mask"])
-            ]
-            prompt_tokens["attention_mask"] = new_attention_mask
+        eos_token_id = tokenizer.eos_token_id
+        # Get indices in list prompt_tokens["input_ids"] that equals the EOS token (often 0)
+        eos_indices_prompt = [i for i, x in enumerate(prompt_tokens["input_ids"]) if x == eos_token_id]
+        # attention mask these indices to eos_token_id
+        new_attention_mask = [
+            0 if i in eos_indices_prompt else p for i, p in enumerate(prompt_tokens["attention_mask"])
+        ]
+        prompt_tokens["attention_mask"] = new_attention_mask
 
-            # do the same for chosen and rejected
-            eos_indices_chosen = [i for i, x in enumerate(chosen_tokens["input_ids"]) if x == eos_token_id]
-            new_attention_mask_c = [
-                0 if i in eos_indices_chosen else p for i, p in enumerate(chosen_tokens["attention_mask"])
-            ]
-            chosen_tokens["attention_mask"] = new_attention_mask_c
+        # do the same for chosen and rejected
+        eos_indices_chosen = [i for i, x in enumerate(chosen_tokens["input_ids"]) if x == eos_token_id]
+        new_attention_mask_c = [
+            0 if i in eos_indices_chosen else p for i, p in enumerate(chosen_tokens["attention_mask"])
+        ]
+        chosen_tokens["attention_mask"] = new_attention_mask_c
 
-            eos_indices_rejected = [i for i, x in enumerate(rejected_tokens["input_ids"]) if x == eos_token_id]
-            new_attention_mask_r = [
-                0 if i in eos_indices_rejected else p for i, p in enumerate(rejected_tokens["attention_mask"])
-            ]
-            rejected_tokens["attention_mask"] = new_attention_mask_r
+        eos_indices_rejected = [i for i, x in enumerate(rejected_tokens["input_ids"]) if x == eos_token_id]
+        new_attention_mask_r = [
+            0 if i in eos_indices_rejected else p for i, p in enumerate(rejected_tokens["attention_mask"])
+        ]
+        rejected_tokens["attention_mask"] = new_attention_mask_r
 
-            # add EOS token to end of prompt
-            chosen_tokens["input_ids"].append(tokenizer.eos_token_id)
-            chosen_tokens["attention_mask"].append(1)
+        # add EOS token to end of prompt
+        chosen_tokens["input_ids"].append(tokenizer.eos_token_id)
+        chosen_tokens["attention_mask"].append(1)
 
-            rejected_tokens["input_ids"].append(tokenizer.eos_token_id)
-            rejected_tokens["attention_mask"].append(1)
+        rejected_tokens["input_ids"].append(tokenizer.eos_token_id)
+        rejected_tokens["attention_mask"].append(1)
 
-            longer_response_length = max(len(chosen_tokens["input_ids"]), len(rejected_tokens["input_ids"]))
+        longer_response_length = max(len(chosen_tokens["input_ids"]), len(rejected_tokens["input_ids"]))
 
-            # if combined sequence is too long, truncate the prompt
-            if len(prompt_tokens["input_ids"]) + longer_response_length > max_length:
+        # if combined sequence is too long, truncate the prompt
+        if len(prompt_tokens["input_ids"]) + longer_response_length > max_length:
 
-                    prompt_tokens = {k: v[-max_prompt_length :] for k, v in prompt_tokens.items()}
+                prompt_tokens = {k: v[-max_prompt_length :] for k, v in prompt_tokens.items()}
 
 
-            # if that's still too long, truncate the response
-            if len(prompt_tokens["input_ids"]) + longer_response_length > max_length:
-                chosen_tokens = {k: v[: max_length - max_prompt_length] for k, v in chosen_tokens.items()}
-                rejected_tokens = {
-                    k: v[: max_length - max_prompt_length] for k, v in rejected_tokens.items()
-                }
+        # if that's still too long, truncate the response
+        if len(prompt_tokens["input_ids"]) + longer_response_length > max_length:
+            chosen_tokens = {k: v[: max_length - max_prompt_length] for k, v in chosen_tokens.items()}
+            rejected_tokens = {
+                k: v[: max_length - max_prompt_length] for k, v in rejected_tokens.items()
+            }
 
-            # Create labels
-            chosen_sequence_tokens = {k: prompt_tokens[k] + chosen_tokens[k] for k in chosen_tokens}
-            rejected_sequence_tokens = {k: prompt_tokens[k] + rejected_tokens[k] for k in rejected_tokens}
-            chosen_sequence_tokens["labels"] = chosen_sequence_tokens["input_ids"][:]
-            chosen_sequence_tokens["labels"][: len(prompt_tokens["input_ids"])] = [-100] * len(
-                prompt_tokens["input_ids"]
-            )
-            rejected_sequence_tokens["labels"] = rejected_sequence_tokens["input_ids"][:]
-            rejected_sequence_tokens["labels"][: len(prompt_tokens["input_ids"])] = [-100] * len(
-                prompt_tokens["input_ids"]
-            )
+        # Create labels
+        chosen_sequence_tokens = {k: prompt_tokens[k] + chosen_tokens[k] for k in chosen_tokens}
+        rejected_sequence_tokens = {k: prompt_tokens[k] + rejected_tokens[k] for k in rejected_tokens}
+        chosen_sequence_tokens["labels"] = chosen_sequence_tokens["input_ids"][:]
+        chosen_sequence_tokens["labels"][: len(prompt_tokens["input_ids"])] = [-100] * len(
+            prompt_tokens["input_ids"]
+        )
+        rejected_sequence_tokens["labels"] = rejected_sequence_tokens["input_ids"][:]
+        rejected_sequence_tokens["labels"][: len(prompt_tokens["input_ids"])] = [-100] * len(
+            prompt_tokens["input_ids"]
+        )
 
-            for k, toks in {
-                "chosen": chosen_sequence_tokens,
-                "rejected": rejected_sequence_tokens,
-                "prompt": prompt_tokens,
-            }.items():
-                for type_key, tokens in toks.items():
-                    if type_key == "token_type_ids":
-                        continue
-                    batch[f"{k}_{type_key}"] = tokens
+        #
+        # # Create labels
+        # chosen_sequence_tokens = {k: prompt_tokens[k] + chosen_tokens[k] for k in chosen_tokens}
+        # rejected_sequence_tokens = {k: prompt_tokens[k] + rejected_tokens[k] for k in rejected_tokens}
+        # chosen_sequence_tokens["labels"] = chosen_sequence_tokens["input_ids"][:]
+        # chosen_sequence_tokens["labels"][: len(prompt_tokens["input_ids"])] =prompt_tokens["input_ids"]
+        #
+        # rejected_sequence_tokens["labels"] = rejected_sequence_tokens["input_ids"][:]
+        # rejected_sequence_tokens["labels"][: len(prompt_tokens["input_ids"])] =prompt_tokens["input_ids"]
+
+
+
+
+
+        for k, toks in {
+            "chosen": chosen_sequence_tokens,
+            "rejected": rejected_sequence_tokens,
+            "prompt": prompt_tokens,
+        }.items():
+            for type_key, tokens in toks.items():
+                if type_key == "token_type_ids":
+                    continue
+                batch[f"{k}_{type_key}"] = tokens
 
 
 
@@ -161,7 +159,7 @@ class DpoStore(BaseRolloutStore):
 
 
     def create_loader(self, batch_size: int, shuffle=False) -> DataLoader:
-        hf_collate_fn = DataCollatorWithPadding(self.tokenizer)
+
 
         def collate_fn(batch: Iterable[dict]):
             padded_batch = {}
@@ -193,5 +191,3 @@ class DpoStore(BaseRolloutStore):
             return padded_batch
 
         return DataLoader(self, batch_size=batch_size, collate_fn=collate_fn, shuffle=shuffle)
-    def push(self, exps: Iterable[Any]):
-        self.history += exps
